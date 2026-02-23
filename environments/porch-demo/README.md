@@ -24,7 +24,7 @@ To see the repositories using `kubectl` or `kpt`:
 
     platforms/kind/use management
     kubectl get repository --namespace=porch-demo
-    kpt alpha repo get --namespace=porch-demo
+    porchctl repo get --namespace=porch-demo
 
 Porch will poll these repositories and create a `PackageRevision` with a matching
 `PackageRevisionResources` for each revision of each kpt package it finds. (Note
@@ -33,14 +33,14 @@ by Porch via [API aggregation](https://kubernetes.io/docs/concepts/extend-kubern
 To list them all using `kubectl` or `kpt`:
 
     kubectl get packagerevision --namespace=porch-demo
-    kpt alpha rpkg get --namespace=porch-demo
+    porchctl rpkg get --namespace=porch-demo
 
 To see the contents of `PackageRevisionResources` for an individual kpt package, e.g. an
 external blueprint, using `kubectl` or `kpt`:
 
     BLUEPRINT=$(workloads/porch/package-revision-name porch-demo external-blueprints free5gc-operator)
     kubectl get packagerevisionresources "$BLUEPRINT" --namespace=porch-demo --output=jsonpath="{range .spec.resources.*}{'---\n'}{@}{end}"
-    kpt alpha rpkg pull "$BLUEPRINT" --namespace=porch-demo
+    porchctl rpkg pull "$BLUEPRINT" --namespace=porch-demo
 
 Create the Blueprint
 --------------------

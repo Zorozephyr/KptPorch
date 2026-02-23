@@ -857,3 +857,410 @@ start script
 ```
 
 ---
+
+## Q14: Porch Server — What It Deploys & Timeout Error
+
+### How `workloads/porch/deploy` works
+
+```bash
+# Downloads blueprint tarball from GitHub (once, cached in blueprint/)
+URL=https://github.com/kptdev/kpt/releases/download/porch/v0.0.23/deployment-blueprint.tar.gz
+
+kubectl apply -f "$HERE/blueprint/"    # Apply all YAMLs from tarball
+kubectl wait deployment porch-server --for=condition=Available --namespace=porch-system
+```
+
+**Yes, it creates a `deployment/porch-server`** in `porch-system` namespace. The blueprint contains:
+
+| Resource | Namespace | Purpose |
+|---|---|---|
+| `Namespace` | `porch-system` | Porch's namespace |
+| `Deployment/porch-server` | `porch-system` | Porch API server (K8s extension API server) |
+| `Deployment/porch-controllers` | `porch-system` | PackageVariant / PackageVariantSet controllers |
+| `Deployment/function-runner` | `porch-system` | Executes kpt functions in containers |
+| `Service/porch-server` | `porch-system` | Service for the API server |
+| `APIService` | cluster-scoped | Registers Porch with K8s API aggregation layer |
+| CRDs | cluster-scoped | `Repository`, `PackageRevision`, `PackageVariant`, etc. |
+
+### The timeout error
+
+```
+error: timed out waiting for the condition on deployments/porch-server
+```
+
+`kubectl wait` has a **default 30-second timeout** — often insufficient for Porch to pull images and start on a KinD cluster.
+
+### Diagnostic commands
+
+```bash
+kubectl get pods --namespace=porch-system
+kubectl describe pod -l app=porch-server --namespace=porch-system
+kubectl logs -l app=porch-server --namespace=porch-system --tail=30
+kubectl get events --namespace=porch-system --sort-by='.lastTimestamp' | tail -20
+```
+
+### Common causes
+
+1. **Image pull delay** — Porch images are large, KinD needs to download them from gcr.io
+2. **cert-manager missing** — Porch may require cert-manager for TLS certificates
+3. **Resource pressure** — Gitea + PostgreSQL HA + Valkey Cluster are already consuming a lot
+
+---
+
+## Q15: Porch Demo — What Is Deployed Where and Why
+
+### The Big Picture
+
+The porch-demo creates a **GitOps pipeline** using two clusters:
+
+```
+MANAGEMENT CLUSTER                         EDGE1 CLUSTER
+(the "brain" — stores, manages,            (the "worker" — runs actual
+ and orchestrates packages)                 workloads synced from Git)
+
+┌─────────────────────────────┐           ┌─────────────────────────┐
+│  Gitea        (Git server)  │           │  Config Sync            │
+│  Porch        (pkg server)  │──Git──────│  (GitOps agent)         │
+│  Repositories (3 CRs)      │           │                         │
+│  Secret       (Git creds)   │           │  [workloads appear here │
+│                             │           │   after deploy scripts] │
+└─────────────────────────────┘           └─────────────────────────┘
+```
+
+---
+
+### Management Cluster — Line by Line
+
+#### 1. Gitea — Git Server (Line 19)
+
+```bash
+"$ROOT/workloads/gitea/deploy"
+```
+
+**What it deploys (namespace: `gitea`):**
+
+| Resource | Details |
+|---|---|
+| `Deployment/gitea` | Gitea app (v1.25.4), NodePort 32100 |
+| `StatefulSet/gitea-postgresql-ha-postgresql` | PostgreSQL HA (3 replicas) — Gitea's database |
+| `Deployment/gitea-postgresql-ha-pgpool` | Connection pooler for PostgreSQL |
+| `StatefulSet/gitea-valkey-cluster` | Valkey Cluster (3 replicas) — Gitea's cache/session store |
+| PVCs (7 total) | Storage for PostgreSQL (3×10Gi) + Valkey (3×8Gi) + Gitea shared (10Gi) |
+
+**Why:** Gitea is the **central Git server** where all kpt packages are stored. Both Porch (management cluster) and Config Sync (edge1 cluster) read from / write to these Git repos. It's the single source of truth.
+
+#### 2. Create User + Repos (Lines 20–22)
+
+```bash
+"$ROOT/workloads/gitea/admin/create-user" "$GIT_USERNAME" "$GIT_PASSWORD" "$GIT_EMAIL" || true
+"$ROOT/workloads/gitea/admin/create-user-repository" "$GIT_USERNAME" "$GIT_PASSWORD" "$GIT_DEPLOYMENT_REPO" || true
+"$ROOT/workloads/gitea/admin/create-user-repository" "$GIT_USERNAME" "$GIT_PASSWORD" "$GIT_BLUEPRINTS_REPO" || true
+```
+
+**What it creates in Gitea:**
+
+| Item | Value | Purpose |
+|---|---|---|
+| User | `porch-developer` / `porch-developer` | Identity for Git operations |
+| Repo | `porch-developer/edge1` | **Deployment repo** — approved packages land here; Config Sync reads from here |
+| Repo | `porch-developer/blueprints` | **Blueprints repo** — reusable package templates stored here |
+
+**Why:** Porch needs Git repos to store packages. The "edge1" repo is a **deployment repo** (Config Sync will sync it to edge1). The "blueprints" repo is a **template library** (reusable packages that get cloned and customized for deployments).
+
+#### 3. Git Init — Push Initial Commits (Lines 24–26)
+
+```bash
+"$ROOT/workloads/gitea/git-init" ... "$HERE/work/deployment-repository" ... "$GIT_DEPLOYMENT_REPO"
+"$ROOT/workloads/gitea/git-init" ... "$HERE/work/blueprints-repository" ... "$GIT_BLUEPRINTS_REPO"
+```
+
+**What it pushes:**
+
+- **edge1 repo** ← `assets/deployment-repository/root/` — contains placeholder YAMLs for Config Sync (RootSync watches `/root` directory)
+- **blueprints repo** ← `assets/blueprints-repository/README.md` — just a README (needs ≥1 commit for Porch to work)
+
+**Why:** Porch **refuses to register a completely empty Git repo** — it needs at least one commit to detect the branch. The deployment repo also needs the `/root` directory structure for Config Sync's RootSync to watch.
+
+#### 4. Porch — Package Orchestration Server (Line 28)
+
+```bash
+"$ROOT/workloads/porch/deploy"
+```
+
+**What it deploys (namespace: `porch-system`):**
+
+| Resource | Purpose |
+|---|---|
+| `Deployment/porch-server` | **The Porch API server** — extends K8s API with `PackageRevision`, `Repository`, etc. |
+| `Deployment/porch-controllers` | **PackageVariant controller** + **PackageVariantSet controller** — automate package lifecycle |
+| `Deployment/function-runner` | **Function runner** — executes kpt functions (set-namespace, etc.) in isolated containers |
+| `APIService` | Registers Porch with K8s API aggregation layer so `kubectl get packagerevisions` works |
+| CRDs | `Repository`, `PackageRevision`, `PackageRevisionResources`, `PackageVariant`, `PackageVariantSet` |
+| RBAC | ServiceAccounts, ClusterRoles, Bindings |
+
+**Why:** Porch is the **core of the demo**. It provides a Kubernetes-native API for managing kpt packages. Instead of manually running `git clone`, editing YAMLs, and `git push`, you interact with packages as Kubernetes resources (`kubectl get packagerevision`, `porchctl rpkg pull/push/propose/approve`). Porch handles the Git operations behind the scenes.
+
+#### 5. Namespace + Secret + Repository CRs (Lines 31–39)
+
+```bash
+kubectl create namespace porch-demo || true
+
+kubectl create secret generic gitea \
+    --namespace=porch-demo \
+    --type=kubernetes.io/basic-auth \
+    --from-literal=username="$GIT_USERNAME" \
+    --from-literal=password="$GIT_PASSWORD" || true
+
+kubectl apply -f "$HERE/work/porch-repositories.yaml"
+```
+
+**What it creates (namespace: `porch-demo`):**
+
+| Resource | Purpose |
+|---|---|
+| `Namespace/porch-demo` | Working namespace for this demo |
+| `Secret/gitea` | Git credentials so Porch can read/write to Gitea repos |
+| `Repository/edge1` | Tells Porch: "watch `gitea-http.gitea:3000/porch-developer/edge1.git`, it's a **deployment** repo" |
+| `Repository/blueprints` | Tells Porch: "watch `gitea-http.gitea:3000/porch-developer/blueprints.git`, it's a **blueprints** repo" |
+| `Repository/external-blueprints` | Tells Porch: "watch `github.com/nephio-project/free5gc-packages.git`, it's a **blueprints** repo (read-only)" |
+
+**Why:**
+- The **Secret** is needed because the Gitea repos require authentication (unlike the external GitHub repo which is public).
+- The **Repository CRs** are how you "register" Git repos with Porch. Once registered, Porch polls them and creates a `PackageRevision` for every kpt package (every directory with a `Kptfile`) it finds. The `deployment: true` flag on the `edge1` repo tells Porch this is where finalized, ready-to-deploy packages go.
+- The **external-blueprints** repo (Nephio's free5gc-packages) provides real-world blueprints you can pull from and customize.
+
+---
+
+### Edge1 Cluster — Line by Line
+
+#### 6. Config Sync — GitOps Agent (Line 45)
+
+```bash
+"$ROOT/workloads/config-sync/deploy"
+```
+
+Which runs:
+```bash
+kubectl apply -f "https://github.com/GoogleContainerTools/kpt-config-sync/releases/download/v1.16.1/config-sync-manifest.yaml"
+kubectl wait deployment/reconciler-manager --namespace=config-management-system --for=condition=Available --timeout=1h
+```
+
+**What it deploys (multiple namespaces):**
+
+| Resource | Namespace | Purpose |
+|---|---|---|
+| `Deployment/reconciler-manager` | `config-management-system` | Core controller — watches RootSync/RepoSync, spawns reconciler pods |
+| `Deployment/otel-collector` | `config-management-monitoring` | Telemetry collector (optional) |
+| `Deployment/resource-group-controller-manager` | `resource-group-system` | Tracks which K8s resources were synced from Git |
+| CRDs (6) | cluster-scoped | `RootSync`, `RepoSync`, `ClusterSelector`, `NamespaceSelector`, `ResourceGroup`, `Cluster` |
+| RBAC, ConfigMaps, LimitRanges | various | Supporting infrastructure |
+
+**Why:** Config Sync is the **GitOps delivery mechanism**. Once a package is approved in Porch and published to the `edge1` Git repo, someone needs to **actually apply those YAMLs to the edge1 cluster**. Config Sync does this automatically:
+
+1. A `RootSync` CR is applied (later, by `deploy-blueprint` script) pointing at the `edge1` Git repo
+2. Config Sync's reconciler-manager spawns a reconciler pod
+3. The reconciler polls the Git repo every 15 seconds
+4. Any YAML it finds gets `kubectl apply`'d to edge1
+5. Any YAML removed from Git gets deleted from edge1
+
+**Note:** Config Sync is idle after `start` finishes — no RootSync exists yet. It only starts syncing after you run `deploy-blueprint` or `deploy-blueprint-variant`.
+
+---
+
+### Why Two Clusters?
+
+This simulates a **real production GitOps architecture:**
+
+| | Management Cluster | Edge1 Cluster |
+|---|---|---|
+| **Role** | Control plane — stores packages, manages lifecycle | Data plane — runs actual workloads |
+| **Analogy** | The "headquarters" | The "factory floor" |
+| **Who writes** | Platform engineers (via Porch) | Nobody (Config Sync applies automatically) |
+| **Who reads** | Porch reads/writes Git repos | Config Sync reads Git repo |
+| **Key insight** | **Never runs user workloads** | **Never manages packages** |
+
+In production (e.g., Nephio/5G), you'd have 1 management cluster and **hundreds** of edge clusters, each with Config Sync watching a different deployment repo (or different directory of the same repo).
+
+### Complete resource map
+
+```
+MANAGEMENT CLUSTER (kind-management)
+├── Namespace: gitea
+│   ├── Deployment/gitea                        ← Git server
+│   ├── StatefulSet/gitea-postgresql-ha (×3)    ← Database
+│   ├── Deployment/gitea-postgresql-ha-pgpool   ← DB connection pool
+│   ├── StatefulSet/gitea-valkey-cluster (×3)   ← Cache/session
+│   └── PVCs (×7)                               ← Persistent storage
+├── Namespace: porch-system
+│   ├── Deployment/porch-server                 ← Package API server
+│   ├── Deployment/porch-controllers            ← Package lifecycle automation
+│   └── Deployment/function-runner              ← kpt function executor
+├── Namespace: porch-demo
+│   ├── Secret/gitea                            ← Git credentials
+│   ├── Repository/edge1                        ← Deployment repo registration
+│   ├── Repository/blueprints                   ← Internal blueprints registration
+│   └── Repository/external-blueprints          ← Nephio blueprints registration
+└── CRDs: Repository, PackageRevision, PackageVariant, etc.
+
+EDGE1 CLUSTER (kind-edge1)
+├── Namespace: config-management-system
+│   └── Deployment/reconciler-manager           ← Core GitOps controller
+├── Namespace: config-management-monitoring
+│   └── Deployment/otel-collector               ← Telemetry
+├── Namespace: resource-group-system
+│   └── Deployment/resource-group-controller    ← Resource tracking
+├── CRDs: RootSync, RepoSync, etc.
+└── [empty until deploy-blueprint runs]
+```
+
+---
+
+## Q16: Why are there so many Package Revisions and what do the columns mean?
+
+### The Output Explained
+
+When you ran `environments/porch-demo/start`, you saw a huge list of `PackageRevisions`. Even though you only saw 2 repos ("edge1" and "blueprints") in your local Gitea instance, **Porch registered a third repository that points to the public internet**.
+
+Look closely at the `REPOSITORY` column in your output:
+```
+NAMESPACE    NAME                                          PACKAGE             ...  REPOSITORY
+porch-demo   external-blueprints-00b6673...                pkg-example-smf-bp  ...  external-blueprints
+porch-demo   external-blueprints-3bd78e...                 pkg-example-smf-bp  ...  external-blueprints
+...
+```
+
+**ALL of those packages came from the `external-blueprints` repository.**
+
+### Where did `external-blueprints` come from?
+
+In the `start` script, it applied `assets/porch-repositories.yaml`, which contained **three** `Repository` resources:
+
+1. `edge1` (internal Gitea)
+2. `blueprints` (internal Gitea)
+3. **`external-blueprints`** (external GitHub)
+
+Here is the exact YAML that was applied for the third one:
+```yaml
+apiVersion: config.porch.kpt.dev/v1alpha1
+kind: Repository
+metadata:
+  name: external-blueprints
+  namespace: porch-demo
+spec:
+  description: External blueprints
+  content: Package
+  deployment: false
+  type: git
+  git:
+    repo: https://github.com/nephio-project/free5gc-packages.git
+    directory: /
+    branch: main
+```
+
+**What happened:** Porch connected to that public GitHub repo (`nephio-project/free5gc-packages`), scanned it, and found numerous Kpt packages (with different versions/tags like `v1`, `v2`, `main`). For *every single version* of *every single package* it found in that Github repo, Porch created a `PackageRevision` object in your cluster. That's why your list is so long!
+
+### Understanding the Columns
+
+When you run `kubectl get packagerevision` (or `porchctl rpkg get`), here is what the columns mean:
+
+#### 1. `REPOSITORY`
+This is the **name of the `Repository` Custom Resource** in Porch that points to the actual Git URL.
+- E.g., `external-blueprints` points to `https://github.com/nephio-project/free5gc-packages.git`.
+
+#### 2. `PACKAGE`
+This is the **name of the kpt package** as defined inside the `Kptfile` of that directory.
+- A single Git repository can contain *many* different packages in different subdirectories.
+- E.g., `pkg-example-smf-bp`, `free5gc-operator`, `free5gc-upf`.
+
+#### 3. `FILES`
+This is the **number of YAML files** contained inside that specific version of the kpt package.
+- When Porch reads the Git repo, it counts the configuration files that make up that package.
+- E.g., `17` means there are 17 separate YAML files (deployments, services, configmaps, etc.) that define that specific blueprint.
+
+### Summary
+You didn't accidentally deploy these to your cluster's workloads. Porch just **indexed** them. They are sitting in Porch's database as available "blueprints" that you *could* choose to clone, mutate, and deploy to your `edge1` repo later if you wanted to.
+
+---
+
+## Q17: Explaining the Porch CLI commands from the README
+
+You asked about these three lines from `environments/porch-demo/README.md`:
+
+```bash
+BLUEPRINT=$(workloads/porch/package-revision-name porch-demo external-blueprints free5gc-operator)
+kubectl get packagerevisionresources "$BLUEPRINT" --namespace=porch-demo --output=jsonpath="{range .spec.resources.*}{'---\n'}{@}{end}"
+porchctl rpkg pull "$BLUEPRINT" --namespace=porch-demo
+```
+
+These commands demonstrate how to interact with Porch to find a package, view its actual YAML contents (without downloading it), and then finally download it locally.
+
+### 1. Finding the exact PackageRevision name
+
+```bash
+BLUEPRINT=$(workloads/porch/package-revision-name porch-demo external-blueprints free5gc-operator)
+```
+
+**What it does:** Looks up the auto-generated Kubernetes resource name for a specific kpt package and saves it in the `BLUEPRINT` variable.
+
+**Why it's needed:** When Porch discovers packages in Git, it generates long unique IDs for them (e.g., `external-blueprints-9fee880e8fa...`). Since you can't guess that string, the helper script `package-revision-name` queries the Kubernetes API using field selectors to say:
+*"Find the `PackageRevision` in the `porch-demo` namespace, originating from the `external-blueprints` repository, where the package name is `free5gc-operator`, and grab the name of its latest available version (the `kpt.dev/latest-revision=true` label)."*
+
+### 2. Viewing the YAMLs stored inside Porch
+
+```bash
+kubectl get packagerevisionresources "$BLUEPRINT" --namespace=porch-demo --output=jsonpath="{range .spec.resources.*}{'---\n'}{@}{end}"
+```
+
+**What it does:** Prints the actual raw YAML contents of the package directly to your terminal.
+
+**How it works:** `PackageRevisionResources` is a special API endpoint provided by the Porch extension server. It doesn't just hold metadata; it holds the *actual file contents* of the package as a map of `filename: yaml-content`. 
+The magical-looking `--output=jsonpath` part loops through every file inside `spec.resources`, prints a `---` separator, and then prints the YAML content. This lets you inspect the blueprints without ever installing `kpt` or using git.
+
+### 3. Pulling the package locally
+
+```bash
+porchctl rpkg pull "$BLUEPRINT" --namespace=porch-demo
+```
+
+**What it does:** Downloads the kpt package from Porch into a local directory on your machine.
+
+**Why:** Once you've inspected the `PackageRevisionResources` and decided you want to use or edit this package, `porchctl rpkg pull` fetches all the YAML files and saves them to a local `free5gc-operator/` folder. This is the equivalent of doing a `git clone`, but routed entirely through the Kubernetes/Porch API instead of talking to the Git server directly.
+
+---
+
+## Q18: What is the difference between a "Blueprint" and "Deployment" repository?
+
+In the Porch / Config Sync ecosystem, repositories serve two entirely different purposes. Think of them as the **"Library"** vs the **"Execution Plan."**
+
+### 1. Blueprint Repository (The "Library")
+
+- **Purpose:** To store raw, reusable kpt package templates (the blueprints).
+- **Contents:** YAML manifests with placeholders, configuration options (`Kptfile`), and generic settings. These packages are **not ready to be deployed** to a cluster yet.
+- **Analogy:** It's like an architecture blueprint or a cookie cutter. You don't live in the blueprint, you use it to build houses.
+- **Deployment Status:** In `porch-repositories.yaml`, these have `deployment: false`.
+- **Examples in Demo:** 
+  - `blueprints` (Internal Gitea) - where you author and save your own packages.
+  - `external-blueprints` (Public GitHub) - where you pull pre-written packages from open-source projects (like Nephio).
+
+### 2. Deployment Repository (The "Execution Plan")
+
+- **Purpose:** To hold the localized, production-ready, customized versions of packages that correspond to a specific Kubernetes cluster.
+- **Contents:** Concrete YAML manifests where all the blanks have been filled in, IP addresses set, specific namespaces assigned (e.g., via the `set-namespace` kpt function), and site-specific values configured.
+- **Analogy:** It is the actual baked cookie, ready to be eaten.
+- **Deployment Status:** In `porch-repositories.yaml`, these have `deployment: true`.
+- **Who reads it:** **Config Sync** (the GitOps agent on the edge cluster). Config Sync watches this repository and continuously runs `kubectl apply` on everything inside it.
+- **Example in Demo:** 
+  - `edge1` (Internal Gitea) - This repo maps 1:1 to the `edge1` KinD cluster. Whatever goes in here, runs on edge1.
+
+### The Workflow Connecting Them
+
+The entire Porch workflow is about moving packages from the Blueprint repo to the Deployment repo:
+
+1. **Pull** a generic template from the Blueprint repo.
+2. **Mutate** it for your specific target (e.g., change the namespace to `network-function-a`, set resource limits).
+3. **Push/Propose/Approve** the customized package into the Deployment repo (e.g., `edge1`).
+4. **Deploy:** Config Sync sees the new package in the Deployment repo and instantly applies it to the cluster.
+
+If you tried to make Config Sync watch a Blueprint repository directly, it would fail or deploy broken services because the templates aren't fully configured yet.
+
+---

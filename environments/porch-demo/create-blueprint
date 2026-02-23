@@ -8,7 +8,7 @@ HERE=$(dirname "$(readlink --canonicalize "$BASH_SOURCE")")
 
 "$ROOT/platforms/kind/use" management
 
-BLUEPRINT=$(kpt alpha rpkg init network-function --workspace=v1 --repository="$GIT_BLUEPRINTS_REPO" --namespace=porch-demo | cut --delimiter=' ' --fields=1)
-kpt alpha rpkg push "$BLUEPRINT" "$HERE/work/blueprints/network-function/" --namespace=porch-demo
-kpt alpha rpkg propose "$BLUEPRINT" --namespace=porch-demo
-kpt alpha rpkg approve "$BLUEPRINT" --namespace=porch-demo
+BLUEPRINT=$(porchctl rpkg init network-function --workspace=v1 --repository="$GIT_BLUEPRINTS_REPO" --namespace=porch-demo | cut --delimiter=' ' --fields=1)
+porchctl rpkg push "$BLUEPRINT" "$HERE/work/blueprints/network-function/" --namespace=porch-demo
+porchctl rpkg propose "$BLUEPRINT" --namespace=porch-demo
+porchctl rpkg approve "$BLUEPRINT" --namespace=porch-demo

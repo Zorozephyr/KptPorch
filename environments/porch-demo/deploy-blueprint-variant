@@ -17,17 +17,17 @@ until DEPLOYMENT=$("$ROOT/workloads/porch/package-revision-name" porch-demo edge
 	sleep 1
 done
 
-kpt alpha rpkg pull "$DEPLOYMENT" "$HERE/work/temporary/" --namespace=porch-demo
+porchctl rpkg pull "$DEPLOYMENT" "$HERE/work/temporary/" --namespace=porch-demo
 kpt fn eval --image=gcr.io/kpt-fn/set-namespace:v0.4.1 "$HERE/work/temporary/" -- namespace=network-function-b
-kpt alpha rpkg push "$DEPLOYMENT" "$HERE/work/temporary/" --namespace=porch-demo
-kpt alpha rpkg propose "$DEPLOYMENT" --namespace=porch-demo
-kpt alpha rpkg approve "$DEPLOYMENT" --namespace=porch-demo
+porchctl rpkg push "$DEPLOYMENT" "$HERE/work/temporary/" --namespace=porch-demo
+porchctl rpkg propose "$DEPLOYMENT" --namespace=porch-demo
+porchctl rpkg approve "$DEPLOYMENT" --namespace=porch-demo
 
 # Deletion:
 # Warning! You cannot delete the package while the ResourceVariant exists!
 # kubectl delete -f "$HERE/work/variant.yaml"
-# kpt alpha rpkg propose-delete "$DEPLOYMENT" --namespace=porch-demo
-# kpt alpha rpkg del "$DEPLOYMENT" --namespace=porch-demo
+# porchctl rpkg propose-delete "$DEPLOYMENT" --namespace=porch-demo
+# porchctl rpkg del "$DEPLOYMENT" --namespace=porch-demo
 
 "$ROOT/platforms/kind/use" edge1
 
