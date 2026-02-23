@@ -352,3 +352,429 @@ kubectl get all --namespace=gitea
 | **StatefulSet name** | `gitea` | `gitea-postgresql-ha-postgresql`, `gitea-valkey-cluster` |
 
 ---
+
+## Q4: Explain the YAML files for the management and edge1 clusters
+
+Each cluster has **two files**: an `env` file (shell variables) and a `cluster.yaml` (KinD config template). The YAML files are **templates** — the `$VARIABLES` get replaced via `envsubst` before being passed to `kind create cluster`.
+
+---
+
+### Management Cluster
+
+**`platforms/kind/clusters/management/env`:**
+
+```bash
+CLUSTER_NAME=management
+CLUSTER_DISPLAY_NAME=Management
+
+API_PORT=31000
+DASHBOARD_PORT=32000
+```
+
+**`platforms/kind/clusters/management/cluster.yaml` (template):**
+
+```yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+
+name: $CLUSTER_NAME                        # → "management"
+networking:
+  apiServerAddress: $API_ADDRESS            # → "127.0.0.1" (default from kind/start)
+  apiServerPort: $API_PORT                  # → 31000
+  podSubnet: 10.97.0.0/16                  # Custom pod CIDR
+  serviceSubnet: 10.197.0.0/16             # Custom service CIDR
+nodes:
+- role: control-plane
+  extraPortMappings:
+  - containerPort: $DASHBOARD_CONTAINER_PORT  # → 30000 (default from kind/start)
+    hostPort: $DASHBOARD_PORT                 # → 32000
+  - containerPort: 32100                      # Gitea NodePort (hardcoded)
+    hostPort: 32100                           # Same port on host
+```
+
+**Line-by-line explanation:**
+
+| Field | Value | Meaning |
+|---|---|---|
+| `kind: Cluster` | — | This is a KinD cluster configuration (not a Kubernetes resource) |
+| `apiVersion: kind.x-k8s.io/v1alpha4` | — | KinD config API version |
+| `name` | `management` | The KinD cluster will be named "management". kubectl context becomes `kind-management` |
+| `apiServerAddress` | `127.0.0.1` | The K8s API server binds to localhost |
+| `apiServerPort` | `31000` | The K8s API server is exposed on host port 31000 |
+| `podSubnet` | `10.97.0.0/16` | Custom IP range for Pods (avoids overlap with edge1's `10.98.0.0/16`) |
+| `serviceSubnet` | `10.197.0.0/16` | Custom IP range for Services (avoids overlap with edge1's `10.198.0.0/16`) |
+| `nodes[0].role` | `control-plane` | Single-node cluster — this node acts as both control plane and worker |
+| `extraPortMappings[0]` | `30000 → 32000` | Maps the **dashboard's** container NodePort (30000) to host port 32000 |
+| `extraPortMappings[1]` | `32100 → 32100` | Maps **Gitea's** NodePort (32100) straight through to host port 32100 |
+
+---
+
+### Edge1 Cluster
+
+**`platforms/kind/clusters/edge1/env`:**
+
+```bash
+CLUSTER_NAME=edge1
+CLUSTER_DISPLAY_NAME='Edge 1'
+
+API_PORT=31001
+DASHBOARD_PORT=32001
+```
+
+**`platforms/kind/clusters/edge1/cluster.yaml` (template):**
+
+```yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+
+name: $CLUSTER_NAME                        # → "edge1"
+networking:
+  apiServerAddress: $API_ADDRESS            # → "127.0.0.1"
+  apiServerPort: $API_PORT                  # → 31001
+  podSubnet: 10.98.0.0/16                  # Different from management!
+  serviceSubnet: 10.198.0.0/16             # Different from management!
+nodes:
+- role: control-plane
+  extraPortMappings:
+  - containerPort: $DASHBOARD_CONTAINER_PORT  # → 30000
+    hostPort: $DASHBOARD_PORT                 # → 32001
+```
+
+**Key differences from management:**
+
+| Aspect | Management | Edge1 |
+|---|---|---|
+| `name` | `management` | `edge1` |
+| `apiServerPort` | `31000` | `31001` |
+| `podSubnet` | `10.97.0.0/16` | `10.98.0.0/16` |
+| `serviceSubnet` | `10.197.0.0/16` | `10.198.0.0/16` |
+| `DASHBOARD_PORT` | `32000` | `32001` |
+| **Gitea port mapping** | ✅ Yes (32100) | ❌ None |
+
+---
+
+### Why different subnets?
+
+Since both clusters run on the **same Docker network** on your host machine, they need **non-overlapping IP ranges**. If both used the default `10.96.0.0/16` pods and `10.96.0.0/12` services, there would be IP conflicts. So each cluster gets its own CIDR block:
+
+```
+Management:  Pods → 10.97.x.x    Services → 10.197.x.x
+Edge1:       Pods → 10.98.x.x    Services → 10.198.x.x
+```
+
+### Why does edge1 have NO Gitea port mapping?
+
+Because **Gitea only runs on the management cluster**. Edge1 doesn't need to expose port 32100 since it doesn't host a Git server — it only runs Config Sync which *pulls from* Gitea over the Docker network.
+
+### How `envsubst` works here
+
+The `kind/start` script runs:
+
+```bash
+CLUSTER_NAME="$CLUSTER_NAME" API_ADDRESS="$API_ADDRESS" API_PORT="$API_PORT" \
+DASHBOARD_PORT="$DASHBOARD_PORT" DASHBOARD_CONTAINER_PORT="$DASHBOARD_CONTAINER_PORT" \
+envsubst < "$HERE/clusters/$CLUSTER/cluster.yaml" > "$HERE/work/$CLUSTER-cluster.yaml"
+```
+
+This reads the template YAML, replaces all `$VARIABLE` placeholders with actual values, and writes the result to `work/management-cluster.yaml` or `work/edge1-cluster.yaml`. That generated file is then passed to `kind create cluster --config=...`.
+
+### What the resulting port layout looks like on your host
+
+```
+Host Machine (localhost)
+├── Port 31000 → management cluster K8s API
+├── Port 31001 → edge1 cluster K8s API
+├── Port 32000 → management cluster Dashboard (Web View)
+├── Port 32001 → edge1 cluster Dashboard (Web View)
+└── Port 32100 → management cluster Gitea (Git server)
+```
+
+---
+
+## Q5: How to open the Gitea dashboard in my browser when running on a remote Azure VM?
+
+### The Problem
+
+The KinD cluster config has `apiServerAddress: $API_ADDRESS` which defaults to `127.0.0.1`. This means the ports (including Gitea's 32100) are only bound to **localhost on the Azure VM** — they're not accessible from outside the VM.
+
+---
+
+### Option 1: SSH Port Forwarding (Recommended — simplest & most secure)
+
+From **your local machine**, run:
+
+```bash
+ssh -L 32100:localhost:32100 -L 32000:localhost:32000 -L 32001:localhost:32001 <your-azure-user>@<azure-vm-public-ip>
+```
+
+This tunnels the remote ports to your local machine. Then open in your **local browser**:
+
+- **Gitea**: `http://localhost:32100`
+- **Management Dashboard**: `http://localhost:32000`
+- **Edge1 Dashboard**: `http://localhost:32001`
+
+**Breakdown of the flags:**
+| Flag | Meaning |
+|---|---|
+| `-L 32100:localhost:32100` | Forward local port 32100 → remote VM's localhost:32100 (Gitea) |
+| `-L 32000:localhost:32000` | Forward local port 32000 → remote VM's localhost:32000 (Mgmt dashboard) |
+| `-L 32001:localhost:32001` | Forward local port 32001 → remote VM's localhost:32001 (Edge1 dashboard) |
+
+**If you're already SSH'd into the VM**, you can set up the tunnel separately:
+```bash
+ssh -N -L 32100:localhost:32100 <your-azure-user>@<azure-vm-public-ip>
+```
+(`-N` means don't execute a remote command, just forward ports)
+
+---
+
+### Option 2: `kubectl port-forward` (Works without changing KinD config)
+
+SSH into the Azure VM first, then:
+
+```bash
+# Switch to management cluster
+kubectl config use-context kind-management
+
+# Port-forward Gitea service to all interfaces (0.0.0.0)
+kubectl port-forward svc/gitea-http --namespace=gitea --address=0.0.0.0 8080:3000 &
+```
+
+Then open: `http://<azure-vm-public-ip>:8080`
+
+> ⚠️ **Note:** You'll need to open port 8080 in your Azure NSG (Network Security Group) for this to work.
+
+---
+
+### Option 3: Change `apiServerAddress` to `0.0.0.0` (Binds to all interfaces)
+
+Before creating the clusters, modify the KinD config so ports bind to all network interfaces instead of just localhost. Create/edit `_override` at the project root:
+
+```bash
+# In the project root, create _override file
+echo 'API_ADDRESS=0.0.0.0' > _override
+```
+
+This makes `apiServerAddress: 0.0.0.0` in the generated cluster YAML, so **all ports** (31000, 31001, 32000, 32001, 32100) become accessible on the VM's public IP.
+
+Then open: `http://<azure-vm-public-ip>:32100`
+
+> ⚠️ **Security Warning:** This exposes your K8s API and all services to the internet. You **must** ensure your Azure NSG only allows traffic from your IP.
+
+**Azure NSG rule to add:**
+
+```bash
+az network nsg rule create \
+  --resource-group <your-rg> \
+  --nsg-name <your-nsg> \
+  --name AllowKindPorts \
+  --priority 1000 \
+  --source-address-prefixes <your-local-ip>/32 \
+  --destination-port-ranges 31000-32100 \
+  --access Allow \
+  --protocol Tcp
+```
+
+---
+
+### Recommendation
+
+| Method | Pros | Cons |
+|---|---|---|
+| **SSH Tunnel** ✅ | No config changes, secure, no NSG changes | Need to keep SSH session open |
+| **kubectl port-forward** | Flexible, works per-service | Need NSG change, runs in foreground |
+| **0.0.0.0 binding** | Most convenient, all ports accessible | Least secure, need NSG changes, need to recreate clusters |
+
+**SSH tunneling is the best option** — zero config changes, zero security risk, and works immediately.
+
+---
+
+## Q6: How to add the PEM key to the SSH tunnel command?
+
+Use the **`-i`** flag to specify the private key file:
+
+```bash
+ssh -i /path/to/your-key.pem \
+  -L 32100:localhost:32100 \
+  -L 32000:localhost:32000 \
+  -L 32001:localhost:32001 \
+  <your-azure-user>@<azure-vm-public-ip>
+```
+
+| Flag | Meaning |
+|---|---|
+| `-i /path/to/your-key.pem` | Use this private key file for authentication |
+| `-L ...` | Port forwarding (same as before) |
+
+**Common example for Azure:**
+
+```bash
+ssh -i ~/.ssh/myAzureVM.pem \
+  -L 32100:localhost:32100 \
+  -L 32000:localhost:32000 \
+  -L 32001:localhost:32001 \
+  azureuser@20.123.45.67
+```
+
+> **Tip:** Make sure the PEM file has correct permissions: `chmod 400 /path/to/your-key.pem` — SSH will refuse to use it if it's too open.
+
+---
+
+## Q7: How to sign in to the Gitea dashboard?
+
+The deploy scripts create **two users**. Use either set of credentials on the Gitea sign-in page:
+
+### Admin User (created by `workloads/gitea/deploy`)
+
+| Field | Value |
+|---|---|
+| **Username** | `administrator` |
+| **Password** | `administrator` |
+| **Source** | `workloads/gitea/_env` |
+| **Role** | Admin (full access — can manage all users, repos, settings) |
+
+### Demo User (created by `environments/config-sync-demo/start`)
+
+| Field | Value |
+|---|---|
+| **Username** | `config-sync-developer` |
+| **Password** | `config-sync` |
+| **Source** | `environments/config-sync-demo/_env` |
+| **Role** | Regular user (owns the `config-sync-demo` repo) |
+
+### Steps
+
+1. Open `http://localhost:32100` (via SSH tunnel) or `http://<hostname>:32100`
+2. Click **"Sign In"** (top right)
+3. Enter username and password from either user above
+4. Click **"Sign In"**
+
+> **Use `administrator` / `administrator`** if you want full admin access to see all settings and manage users. Use `config-sync-developer` / `config-sync` if you just want to work with the demo repo.
+
+---
+
+## Q8: "Username or password is incorrect" when trying to sign in as administrator — why and how to fix?
+
+### Root Cause
+
+The user was **never actually created**. The `create-user` script (`workloads/gitea/admin/gitea`) runs:
+
+```bash
+kubectl exec statefulset/gitea --container=gitea --namespace=gitea --quiet -- \
+  su git -c "gitea --quiet admin user create ..."
+```
+
+But as we saw in Q3, **there is no `statefulset/gitea`** in the newer chart — Gitea runs as a **Deployment** now. So this `kubectl exec` command **failed**, but the `|| true` in the deploy script swallowed the error silently.
+
+### How to fix — Create the admin user manually
+
+**Step 1:** Find the Gitea pod name:
+
+```bash
+kubectl get pods --namespace=gitea
+```
+
+Look for a pod named something like `gitea-<random-hash>` (the Deployment pod).
+
+**Step 2:** Exec into it and create the admin user:
+
+```bash
+kubectl exec deployment/gitea --container=gitea --namespace=gitea -- \
+  su git -c "gitea admin user create \
+    --username administrator \
+    --password administrator \
+    --email administrator@gitea \
+    --admin \
+    --must-change-password=false"
+```
+
+> **If the password `administrator` is rejected** (newer Gitea versions require minimum 8 chars with complexity), use a stronger password:
+
+```bash
+kubectl exec deployment/gitea --container=gitea --namespace=gitea -- \
+  su git -c "gitea admin user create \
+    --username administrator \
+    --password 'Admin123!' \
+    --email administrator@gitea \
+    --admin \
+    --must-change-password=false"
+```
+
+**Step 3:** Also create the demo user:
+
+```bash
+kubectl exec deployment/gitea --container=gitea --namespace=gitea -- \
+  su git -c "gitea admin user create \
+    --username config-sync-developer \
+    --password config-sync \
+    --email config-sync-developer@gitea \
+    --must-change-password=false"
+```
+
+**Step 4:** Create the demo repo (via API):
+
+```bash
+curl -X POST "http://localhost:32100/api/v1/user/repos" \
+  -H "Content-Type: application/json" \
+  -u "config-sync-developer:config-sync" \
+  -d '{"name": "config-sync-demo", "default_branch": "main"}'
+```
+
+### Why this happened — summary
+
+The `workloads/gitea/admin/gitea` script has the same stale reference to `statefulset/gitea` that we fixed in the deploy script. It should be updated to `deployment/gitea` as well for the newer chart version.
+
+---
+
+## Q9: "su: must be suid to work properly" error when creating user
+
+### Why it happens
+
+The older `create-user` script uses `su git -c "gitea ..."` to switch to the `git` user before running the Gitea CLI. But in newer Gitea container images, the `su` binary doesn't have the suid bit set (for security hardening). However, the container **already runs as the `git` user**, so `su` is unnecessary.
+
+### Fix — run `gitea` directly without `su`
+
+```bash
+kubectl exec deployment/gitea --container=gitea --namespace=gitea -- \
+  gitea admin user create \
+    --username administrator \
+    --password administrator \
+    --email administrator@gitea \
+    --admin \
+    --must-change-password=false
+```
+
+If the password `administrator` is rejected (password complexity), try:
+
+```bash
+kubectl exec deployment/gitea --container=gitea --namespace=gitea -- \
+  gitea admin user create \
+    --username administrator \
+    --password 'Admin@1234' \
+    --email administrator@gitea \
+    --admin \
+    --must-change-password=false
+```
+
+Then create the demo user:
+
+```bash
+kubectl exec deployment/gitea --container=gitea --namespace=gitea -- \
+  gitea admin user create \
+    --username config-sync-developer \
+    --password config-sync \
+    --email config-sync-developer@gitea \
+    --must-change-password=false
+```
+
+### Verify who the container runs as
+
+You can check what user the container runs as:
+
+```bash
+kubectl exec deployment/gitea --container=gitea --namespace=gitea -- whoami
+```
+
+This should output `git`, confirming `su` is not needed.
+
+---
