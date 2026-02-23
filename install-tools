@@ -1,0 +1,47 @@
+#!/bin/bash
+set -e
+
+if [ "$EUID" -ne 0 ]; then
+	echo "Run this script as root"
+	exit 1
+fi
+
+HERE=$(dirname "$(readlink --canonicalize "$BASH_SOURCE")")
+. "$HERE/_env"
+. "$HERE/library/_trap"
+
+FORCE=false
+if [ "$1" == -f ]; then
+	FORCE=true
+fi
+
+install_tool minikube "$MINIKUBE_VERSION" \
+"https://storage.googleapis.com/minikube/releases/v$MINIKUBE_VERSION/minikube-linux-amd64"
+
+install_tool kind "$KIND_VERSION" \
+"https://github.com/kubernetes-sigs/kind/releases/download/v$KIND_VERSION/kind-linux-amd64"
+
+install_tool kubectl "$KUBECTL_VERSION" \
+"https://storage.googleapis.com/kubernetes-release/release/v$KUBECTL_VERSION/bin/linux/amd64/kubectl"
+
+install_tool oc "$OC_VERSION" \
+"https://github.com/okd-project/okd/releases/download/$OC_VERSION/openshift-client-linux-$OC_VERSION.tar.gz" 0
+
+install_tool kpt "$KPT_VERSION" \
+"https://github.com/kptdev/kpt/releases/download/v$KPT_VERSION/kpt_linux_amd64-$KPT_VERSION.tar.gz" 0
+
+install_tool virtctl "$KUBEVIRT_VERSION" \
+"https://github.com/kubevirt/kubevirt/releases/download/v$KUBEVIRT_VERSION/virtctl-v${KUBEVIRT_VERSION}-linux-amd64"
+
+install_tool kubectl-cert_manager "$CERT_MANAGER_VERSION" \
+"https://github.com/cert-manager/cert-manager/releases/download/v$CERT_MANAGER_VERSION/kubectl-cert_manager-linux-amd64.tar.gz" 0
+
+install_tool k9s "$K9S_VERSION" \
+"https://github.com/derailed/k9s/releases/download/v$K9S_VERSION/k9s_Linux_amd64.tar.gz" 0
+
+install_tool helm "$HELM_VERSION" \
+"https://get.helm.sh/helm-v$HELM_VERSION-linux-amd64.tar.gz" 1 \
+"linux-amd64/"
+
+install_tool yq "$YQ_VERSION" \
+"https://github.com/mikefarah/yq/releases/download/v$YQ_VERSION/yq_linux_amd64"

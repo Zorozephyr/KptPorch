@@ -1,0 +1,29 @@
+#!/bin/bash
+set -e
+
+HERE=$(dirname "$(readlink --canonicalize "$BASH_SOURCE")")
+. "$HERE/../../_env"
+. "$ROOT/library/_trap"
+. "$HERE/_env"
+
+GITEA_HOST=$HOST:32100
+
+rm --force --recursive "$HERE/admin/tokens/"
+
+kubectl create namespace gitea || true
+helm repo add gitea-charts https://dl.gitea.io/charts/
+helm install gitea gitea-charts/gitea --namespace=gitea \
+	--set=ingress.hosts[0].host="$GITEA_HOST" \
+	--set=service.http.type=NodePort \
+	--set=service.http.nodePort=32100 || true
+
+m 'waiting for Gitea to start...'
+# See: https://github.com/kubernetes/kubernetes/issues/79606
+kubectl rollout status statefulset/gitea --namespace=gitea --watch --timeout=1h 
+
+m "creating \"$ADMINISTRATOR_USERNAME\" user..."
+"$HERE/admin/create-user" "$ADMINISTRATOR_USERNAME" "$ADMINISTRATOR_PASSWORD" "$ADMINISTRATOR_USERNAME@gitea" --admin || true
+
+browse_url "http://$GITEA_HOST"
+m "Gitea admin username: $ADMINISTRATOR_USERNAME" "$CYAN"
+m "Gitea admin password: $ADMINISTRATOR_PASSWORD" "$CYAN"

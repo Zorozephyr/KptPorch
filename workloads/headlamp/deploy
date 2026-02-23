@@ -1,0 +1,18 @@
+#!/bin/bash
+set -e
+
+HERE=$(dirname "$(readlink --canonicalize "$BASH_SOURCE")")
+. "$HERE/../../_env"
+. "$ROOT/library/_trap"
+
+NODE_PORT=${NODE_PORT:-30000}
+
+NODE_PORT="$NODE_PORT" envsubst < "$HERE/assets/headlamp.yaml" | kubectl apply -f -
+
+m "admin token (from \"$HERE/admin-token\"):" "$CYAN"
+"$HERE/admin-token"
+
+if [ "$USE_BROWSER" == true ]; then
+	m 'waiting for Headlamp to start...'
+	kubectl wait deployment/headlamp --namespace=headlamp --for=condition=Available --timeout=1h
+fi

@@ -1,0 +1,16 @@
+#!/bin/bash
+set -e
+
+HERE=$(dirname "$(readlink --canonicalize "$BASH_SOURCE")")
+. "$HERE/../../../_env"
+
+USERNAME=$1
+PASSWORD=$2
+ORG=$3
+REPO=$4
+COLLABORATOR=$5
+
+"$HERE/api" "$USERNAME" "$PASSWORD" \
+	PUT \
+	"repos/$ORG/$REPO/collaborators/$COLLABORATOR" \
+	'{}'

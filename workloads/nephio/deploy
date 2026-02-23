@@ -1,0 +1,22 @@
+#!/bin/bash
+set -e
+
+HERE=$(dirname "$(readlink --canonicalize "$BASH_SOURCE")")
+. "$HERE/../../_env"
+. "$ROOT/library/_trap"
+
+# Requires: gitea, porch, config-sync
+# See: https://github.com/nephio-project/one-summit-22-workshop/
+
+if [ "$1" == -c ]; then
+	rm --recursive --force "$HERE/nephio-system"
+fi
+
+if [ ! -d "$HERE/nephio-system" ]; then
+    kpt pkg get --for-deployment https://github.com/nephio-project/nephio-packages.git/nephio-system "$HERE/nephio-system"
+fi
+
+m 'deploying Package Deployment Controller...'
+kubectl apply -f "$HERE/nephio-system/package-deployment-controller/crds/"
+kubectl create namespace nephio-system || true
+kubectl apply -f "$HERE/nephio-system/package-deployment-controller/app/controller/"

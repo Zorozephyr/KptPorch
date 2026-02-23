@@ -1,0 +1,14 @@
+apiVersion: configsync.gke.io/v1beta1
+kind: RootSync
+
+metadata:
+  name: porch-demo
+  namespace: config-management-system # RootSync must be in this namespace
+
+spec:
+  sourceFormat: unstructured
+  git:
+    repo: $GIT_HOST/$GIT_USERNAME/$GIT_DEPLOYMENT_REPO.git
+    dir: /root
+    branch: main
+    auth: none

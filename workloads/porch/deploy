@@ -1,0 +1,24 @@
+#!/bin/bash
+set -e
+
+HERE=$(dirname "$(readlink --canonicalize "$BASH_SOURCE")")
+. "$HERE/../../_env"
+. "$ROOT/library/_trap"
+
+URL=https://github.com/kptdev/kpt/releases/download/porch/v$PORCH_VERSION/deployment-blueprint.tar.gz
+ARCHIVE=$(mktemp --suffix=.tar.gz)
+
+if [ "$1" == -c ]; then
+	rm --recursive --force "$HERE/blueprint"
+fi
+
+if [ ! -d "$HERE/blueprint" ]; then
+	m 'downloading blueprint...'
+	wget --quiet --output-document="$ARCHIVE" "$URL"
+	mkdir --parents "$HERE/blueprint"
+	tar --extract --file="$ARCHIVE" --directory="$HERE/blueprint"
+	rm --force "$ARCHIVE"
+fi
+
+kubectl apply -f "$HERE/blueprint/"
+kubectl wait deployment porch-server --for=condition=Available --namespace=porch-system

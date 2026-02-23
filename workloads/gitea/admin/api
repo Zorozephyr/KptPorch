@@ -1,0 +1,31 @@
+#!/bin/bash
+set -e
+
+HERE=$(dirname "$(readlink --canonicalize "$BASH_SOURCE")")
+. "$HERE/../../../_env"
+
+USERNAME=$1
+PASSWORD=$2
+VERB=$3
+URI=$4
+DATA=$5
+
+TOKEN=$("$HERE/access-token" "$USERNAME" "$PASSWORD")
+
+if [ -z "$DATA" ]; then
+    kubectl exec statefulset/gitea --container=gitea --namespace=gitea --quiet -- \
+    curl --silent --fail \
+        "http://localhost:3000/api/v1/$URI" \
+        --request "$VERB" \
+        --header "Authorization: token $TOKEN" \
+        --header 'Accept: application/json'
+else
+    kubectl exec statefulset/gitea --container=gitea --namespace=gitea --quiet -- \
+    curl --silent --fail \
+        "http://localhost:3000/api/v1/$URI" \
+        --request "$VERB" \
+        --header "Authorization: token $TOKEN" \
+        --header 'Accept: application/json' \
+        --header 'Content-Type: application/json' \
+        --data "$DATA"
+fi

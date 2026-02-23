@@ -1,0 +1,14 @@
+#!/bin/bash
+set -e
+
+HERE=$(dirname "$(readlink --canonicalize "$BASH_SOURCE")")
+. "$HERE/../../../_env"
+
+USERNAME=$1
+PASSWORD=$2
+REPO=$3
+
+"$HERE/api" "$USERNAME" "$PASSWORD" \
+	POST \
+	user/repos \
+	"{\"name\": \"$REPO\", \"default_branch\": \"main\"}"

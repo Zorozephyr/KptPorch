@@ -1,0 +1,19 @@
+#!/bin/bash
+set -e
+
+HERE=$(dirname "$(readlink --canonicalize "$BASH_SOURCE")")
+. "$HERE/../../_env"
+. "$ROOT/library/_trap"
+
+# See: https://github.com/GoogleContainerTools/kpt-backstage-plugins
+
+if [ "$1" == -c ]; then
+	rm --recursive --force "$HERE/nephio-webui"
+fi
+
+if [ ! -d nephio-webui ]; then
+	kpt pkg get --for-deployment https://github.com/nephio-project/nephio-packages.git/nephio-webui "$HERE/nephio-webui"
+	sed --in-place 's/resourcesNamespace: default/resourcesNamespace: nephio/' "$HERE/nephio-webui/config-map.yaml"
+fi
+
+kubectl apply -f "$HERE/nephio-webui/"

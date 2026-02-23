@@ -1,0 +1,163 @@
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+RESET='\033[0m'
+
+# Colored messages (blue is the default)
+# Examples:
+#   m "hello world"
+#   m "hello world" "$GREEN"
+function m () {
+	local COLOR=${2:-$BLUE}
+	echo -e "$COLOR$1$RESET"
+}
+
+function copy_function () {
+	local ORIG_FUNC=$(declare -f $1)
+	local NEWNAME_FUNC="$2${ORIG_FUNC#$1}"
+	eval "$NEWNAME_FUNC"
+}
+
+function browse_url () {
+	m "browser URL: $1" "$CYAN"
+	if [ "$USE_BROWSER" == true ] && command -v xdg-open > /dev/null; then
+		xdg-open "$1" || true
+	fi
+}
+
+# text
+
+function replace_text () {
+    local FILE=$1
+    local START=$2
+    local END=$3
+    local NEW=$4
+	local T=$(mktemp)
+	head -n $((START-1)) "$FILE" > "$T"
+	echo "$NEW" >> "$T"
+	tail -n +$((END+1)) "$FILE" >> "$T"
+	mv "$T" "$FILE"
+}
+
+function insert_text () {
+    local FILE=$1
+    local START=$2
+    local NEW=$3
+	local T=$(mktemp)
+	head -n $((START-1)) "$FILE" > "$T"
+	echo "$NEW" >> "$T"
+	tail -n +$START "$FILE" >> "$T"
+	mv "$T" "$FILE"
+}
+
+function remove_text () {
+    local FILE=$1
+    local START=$2
+    local END=$3
+	local T=$(mktemp)
+	head -n $((START-1)) "$FILE" > "$T"
+	tail -n +$((END+1)) "$FILE" >> "$T"
+	mv "$T" "$FILE"
+}
+
+function envsubst_cp () {
+	local FROM_FILE=$1
+	local TO_FILE=$2
+	mkdir --parents "$(dirname "$TO_FILE")"
+	cat "$FROM_FILE" | envsubst > "$TO_FILE"
+}
+
+function envsubst_dir () {
+	local FROM_DIR=$1
+	local TO_DIR=$2
+	rm --recursive --force "$TO_DIR"
+	mkdir --parents "$TO_DIR"
+	pushd "$FROM_DIR" > /dev/null
+	local F
+	find . -type f | while read F; do
+		envsubst_cp "$F" "$TO_DIR/$F"
+	done
+	popd > /dev/null
+}
+
+# github
+
+function github_version () {
+	local REPO=$1
+	curl --silent "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/'
+	#git ls-remote -q -t --refs "https://github.com/$REPO.git" | awk '/v/{sub("refs/tags/", ""); print $2 }' | awk '!/^$/' | sort -rV | head -n 1
+}
+
+function github_version_of () {
+	local REPO=$1
+	local PREFIX=$2
+	curl --silent "https://api.github.com/repos/$REPO/releases" | jq '.[].tag_name' | grep "$PREFIX" | head -1 | sed -E 's/.*"([^"]+)".*/\1/'
+}
+
+# kubectl
+
+function kubectl_first_pod () {
+	local NAME=$1
+	kubectl get pods --selector="app.kubernetes.io/name=$NAME" --field-selector=status.phase=Running --namespace="$WORKSPACE" \
+		--output=jsonpath={.items[0].metadata.name}
+}
+
+function kubectl_wait_for_deployment () {
+	local NAME=$1
+	kubectl wait "deployments/$NAME" --namespace="$WORKSPACE" \
+		--for=condition=available
+	kubectl_wait_for_pod "$NAME"
+}
+
+function kubectl_wait_for_pod () {
+	local NAME=$1
+	local POD=$(kubectl_first_pod "$NAME")
+	kubectl wait "pods/$POD" --namespace="$WORKSPACE" \
+		--for=condition=ready
+}
+
+# install
+
+function install_tool () {
+	local NAME=$1
+	local VERSION=$2
+	local URL=$3
+	local STRIP=${4:-1}
+	local ARCHIVE_PREFIX=$5
+	local EXEC=/usr/bin/$NAME
+
+	if [ -f "$EXEC" ]; then
+		if [ "$FORCE" == true ]; then
+			m "overriding existing \"$EXEC\"..."
+		else
+			m "\"$EXEC\" already exists (use -f to overwrite)"
+			return 0
+		fi
+	fi
+
+	m "downloading $NAME $VERSION..."
+	if [ "${URL: -7}" == .tar.gz ] || [ "${URL: -4}" == .tgz ]; then
+		local ARCHIVE=$(mktemp --suffix=.tar.gz)
+		if wget --quiet --output-document="$ARCHIVE" "$URL"; then
+			if tar --extract --file="$ARCHIVE" --directory=/usr/bin --strip="$STRIP" "$ARCHIVE_PREFIX$NAME"; then
+				rm --force "$ARCHIVE"
+			else
+				m "could not write to \"$EXEC\"" "$RED"
+				rm --force "$ARCHIVE"
+			fi
+		else
+			m "could not download from \"$URL\"" "$RED"
+			return
+		fi
+	else
+		if ! wget --quiet --output-document="$EXEC" "$URL"; then
+			m "could not download from \"$URL\" to \"$EXEC\"" "$RED"
+			return
+		fi
+	fi
+
+	chmod a+x "$EXEC"
+	m "installed \"$EXEC\""
+}

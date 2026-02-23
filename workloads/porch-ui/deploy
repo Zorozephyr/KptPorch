@@ -1,0 +1,10 @@
+#!/bin/bash
+set -e
+
+HERE=$(dirname "$(readlink --canonicalize "$BASH_SOURCE")")
+. "$HERE/../../_env"
+. "$ROOT/library/_trap"
+
+kubectl apply -f "$HERE/assets/porch-ui.yaml"
+kubectl wait deployment porch-ui --for=condition=Available --namespace=porch-ui
+browse_url "http://localhost:32200"
