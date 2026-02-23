@@ -4,4 +4,4 @@ set -e
 HERE=$(dirname "$(readlink --canonicalize "$BASH_SOURCE")")
 . "$HERE/../../_env"
 
-kubectl exec statefulset/gitea --container=gitea --namespace=gitea --tty --stdin --quiet -- /bin/bash
+kubectl exec deployment/gitea --container=gitea --namespace=gitea --tty --stdin --quiet -- /bin/bash

@@ -778,3 +778,110 @@ kubectl exec deployment/gitea --container=gitea --namespace=gitea -- whoami
 This should output `git`, confirming `su` is not needed.
 
 ---
+
+## Q10: Why did none of the Gitea admin scripts work (create-user, create-user-repository, create-org, etc.)?
+
+### Root Cause
+
+All admin scripts ultimately depend on either the `gitea` CLI wrapper or the `api` wrapper — and **both** had `statefulset/gitea` hardcoded. Here's the dependency chain:
+
+```
+create-user ──────────→ gitea (CLI wrapper)        ← had statefulset/gitea ✅ FIXED
+create-user-repository → api → access-token        ← BOTH have statefulset/gitea ❌
+create-org ────────────→ api → access-token         ← BOTH have statefulset/gitea ❌  
+create-org-repository ─→ api → access-token         ← BOTH have statefulset/gitea ❌
+add-collaborator ──────→ api → access-token         ← BOTH have statefulset/gitea ❌
+```
+
+### All files that need `statefulset/gitea` → `deployment/gitea`:
+
+| File | Lines with `statefulset/gitea` | Status |
+|---|---|---|
+| `workloads/gitea/admin/gitea` | Line 8 | ✅ Already fixed |
+| `workloads/gitea/admin/api` | Lines 16 and 23 | ❌ Needs fix |
+| `workloads/gitea/admin/access-token` | Lines 21 and 30 | ❌ Needs fix |
+| `workloads/gitea/deploy` | Line 22 | ✅ Already fixed (by user) |
+
+### Additionally: the `su git` issue
+
+Even after fixing `statefulset` → `deployment`, the `gitea` CLI wrapper still uses `su git -c "..."` which fails with "must be suid to work properly" in newer containers (see Q9). The `api` and `access-token` scripts don't use `su` (they use `curl` directly), so they'll work once `statefulset` is fixed.
+
+---
+
+## Q11: Analyzing the re-run errors — users and repo still not created
+
+### Error log breakdown
+
+| Error | Source | Root Cause |
+|---|---|---|
+| `su: must be suid to work properly` (1st) | `workloads/gitea/deploy` → `create-user` → `gitea` wrapper | `su git -c` fails in newer container |
+| `su: must be suid to work properly` (2nd) | `start` script → `create-user` → `gitea` wrapper | Same — `su` issue |
+| `statefulsets.apps "gitea" not found` (×3) | `start` → `create-user-repository` → `api` → `access-token` | `api` and `access-token` weren't fixed yet at this point |
+
+### What's been fixed so far
+
+| File | Fix applied | Status |
+|---|---|---|
+| `workloads/gitea/deploy` | `statefulset` → `deployment` | ✅ |
+| `workloads/gitea/admin/gitea` | `statefulset` → `deployment` | ✅ but still has `su` issue |
+| `workloads/gitea/admin/api` | `statefulset` → `deployment` (×2) | ✅ |
+| `workloads/gitea/admin/access-token` | `statefulset` → `deployment` (×2) | ✅ |
+| `workloads/gitea/shell` | `statefulset` → `deployment` | ✅ |
+| `workloads/gitea/git-init-internal` | `statefulset` → `deployment` | ✅ |
+
+### Still broken: `workloads/gitea/admin/gitea` — the `su` wrapper
+
+The `gitea` CLI wrapper still runs:
+```bash
+su git -c "gitea --quiet $*"
+```
+This needs to be changed to just:
+```bash
+gitea --quiet $*
+```
+Because the container already runs as the `git` user.
+
+### Manual fix right now — create users and repo
+
+Since the scripts failed, you need to create everything manually on the Azure VM. Make sure you're on the management cluster first:
+
+```bash
+kubectl config use-context kind-management
+```
+
+**1. Create admin user:**
+```bash
+kubectl exec deployment/gitea --container=gitea --namespace=gitea -- \
+  gitea admin user create \
+    --username administrator \
+    --password administrator \
+    --email administrator@gitea \
+    --admin \
+    --must-change-password=false
+```
+
+**2. Create demo user:**
+```bash
+kubectl exec deployment/gitea --container=gitea --namespace=gitea -- \
+  gitea admin user create \
+    --username config-sync-developer \
+    --password config-sync \
+    --email config-sync-developer@gitea \
+    --must-change-password=false
+```
+
+**3. Create the repo** (via API, from inside the pod since access-token is now fixed):
+```bash
+# This should work now since api and access-token are fixed:
+workloads/gitea/admin/create-user-repository config-sync-developer config-sync config-sync-demo
+```
+
+Or manually via curl from your local machine (through SSH tunnel):
+```bash
+curl -X POST "http://localhost:32100/api/v1/user/repos" \
+  -H "Content-Type: application/json" \
+  -u "config-sync-developer:config-sync" \
+  -d '{"name": "config-sync-demo", "default_branch": "main"}'
+```
+
+---

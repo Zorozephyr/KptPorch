@@ -13,7 +13,7 @@ ORG=$6
 REPO=$7
 
 function execute () {
-	kubectl exec statefulset/gitea --container=gitea --namespace=gitea -- "$@"
+	kubectl exec deployment/gitea --container=gitea --namespace=gitea -- "$@"
 }
 
 execute rm -rf repository/
