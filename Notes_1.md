@@ -885,3 +885,21 @@ curl -X POST "http://localhost:32100/api/v1/user/repos" \
 ```
 
 ---
+
+## Q12: Where exactly is `su git` used?
+
+Only **one file** in the codebase:
+
+**`workloads/gitea/admin/gitea` — Line 9:**
+
+```bash
+su git -c "gitea --quiet $*"
+```
+
+This is the CLI wrapper that `create-user` (and other CLI-based scripts) call. To fix it, change line 9 to:
+
+```bash
+gitea --quiet $*
+```
+
+---

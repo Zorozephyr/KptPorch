@@ -6,4 +6,4 @@ HERE=$(dirname "$(readlink --canonicalize "$BASH_SOURCE")")
 
 # Note: we cannot run "gitea" as root
 kubectl exec deployment/gitea --container=gitea --namespace=gitea --quiet -- \
-su git -c "gitea --quiet $*"
+gitea --quiet $*
