@@ -19,7 +19,7 @@ helm install gitea gitea-charts/gitea --namespace=gitea \
 
 m 'waiting for Gitea to start...'
 # See: https://github.com/kubernetes/kubernetes/issues/79606
-kubectl rollout status statefulset/gitea --namespace=gitea --watch --timeout=1h 
+kubectl rollout status deployment/gitea --namespace=gitea   # ✅ Correct for v12+
 
 m "creating \"$ADMINISTRATOR_USERNAME\" user..."
 "$HERE/admin/create-user" "$ADMINISTRATOR_USERNAME" "$ADMINISTRATOR_PASSWORD" "$ADMINISTRATOR_USERNAME@gitea" --admin || true
