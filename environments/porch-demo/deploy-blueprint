@@ -17,6 +17,7 @@ kpt fn eval --image=gcr.io/kpt-fn/set-namespace:v0.4.1 "$HERE/work/temporary/" -
 
 # Create the deployment package
 DEPLOYMENT=$(porchctl rpkg init network-function-a --workspace=v1 --repository="$GIT_DEPLOYMENT_REPO" --namespace=porch-demo | cut --delimiter=' ' --fields=1)
+porchctl rpkg pull "$DEPLOYMENT" "$HERE/work/temporary/" --namespace=porch-demo
 porchctl rpkg push "$DEPLOYMENT" "$HERE/work/temporary/" --namespace=porch-demo
 porchctl rpkg propose "$DEPLOYMENT" --namespace=porch-demo
 porchctl rpkg approve "$DEPLOYMENT" --namespace=porch-demo
